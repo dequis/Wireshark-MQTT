@@ -39,18 +39,13 @@ do
 	f.connect_will = ProtoField.uint8("mqttfb.connect.will", "Will Flag", base.DEC, nil, 0x04)
 	f.connect_clean_session = ProtoField.uint8("mqttfb.connect.clean_session", "Clean Session Flag", base.DEC, nil, 0x02)
 	f.connect_keep_alive = ProtoField.uint16("mqttfb.connect.keep_alive", "Keep Alive (secs)")
-	f.connect_payload_clientid = ProtoField.string("mqttfb.connect.payload.clientid", "Client ID")
-	f.connect_payload_username = ProtoField.string("mqttfb.connect.payload.username", "Username")
-	f.connect_payload_password = ProtoField.string("mqttfb.connect.payload.password", "Password")
 
 	-- Publish
-	f.publish_topic = ProtoField.string("mqttfb.publish.topic", "Topic")
+	f.publish_topic = ProtoField.string("mqttfb.topic", "Topic")
 	f.publish_message_id = ProtoField.uint16("mqttfb.publish.message_id", "Message ID")
-	f.publish_data = ProtoField.string("mqttfb.publish.data", "Data")
 
 	-- Subscribe
 	f.subscribe_message_id = ProtoField.uint16("mqttfb.subscribe.message_id", "Message ID")
-	f.subscribe_topic = ProtoField.string("mqttfb.subscribe.topic", "Topic")
 	f.subscribe_qos = ProtoField.uint8("mqttfb.subscribe.qos", "QoS")
 
 	-- SubAck
@@ -108,7 +103,6 @@ do
 		local fixheader_subtree = subtree:add("Fixed Header", nil)
 
 		subtree:append_text(", Message Type: " .. msg_types[msgindex])
-		pinfo.cols.info:set(msg_types[msgindex])
 
 		fixheader_subtree:add(f.message_type, msgtype)
 		fixheader_subtree:add(f.dup, msgtype)
@@ -120,7 +114,12 @@ do
 		local fixhdr_qos = msgtype:bitfield(5,2)
 		subtree:append_text(", QoS: " .. fixhdr_qos)
 
+		local topic = nil
+		local message_id = nil
+		local info = msg_types[msgindex]
+
 		if(msgindex == 1) then -- CONNECT
+			local varhdr_init = offset -- For calculating variable header size
 			local varheader_subtree = subtree:add("Variable Header", nil)
 
 			local name_len = buffer(offset, 2):uint()
@@ -148,28 +147,12 @@ do
 			varheader_subtree:add(f.connect_keep_alive, keepalive)
 
 			local payload_subtree = subtree:add("Payload", nil)
-			-- Client ID
-			local clientid_len = buffer(offset, 2):uint()
-			offset = offset + 2
-			local clientid = buffer(offset, clientid_len)
-			offset = offset + clientid_len
-			payload_subtree:add(f.connect_payload_clientid, clientid)
-			-- Flags
-			if(flags:bitfield(0) == 1) then -- Username flag is true
-				local username_len = buffer(offset, 2):uint()
-				offset = offset + 2
-				local username = buffer(offset, username_len)
-				offset = offset + username_len
-				payload_subtree:add(f.connect_payload_username, username)
-			end
 
-			if(flags:bitfield(1) == 1) then -- Password flag is true
-				local password_len = buffer(offset, 2):uint()
-				offset = offset + 2
-				local password = buffer(offset, password_len)
-				offset = offset + password_len
-				payload_subtree:add(f.connect_payload_password, password)
-			end
+			local data_len = remain_length - (offset - varhdr_init)
+			local data = buffer(offset, data_len)
+
+			offset = offset + data_len
+			payload_subtree:add(f.payload_data, data:uncompress())
 
 
 		elseif(msgindex == 3) then -- PUBLISH
@@ -178,13 +161,13 @@ do
 
 			local topic_len = buffer(offset, 2):uint()
 			offset = offset + 2
-			local topic = buffer(offset, topic_len)
+			topic = buffer(offset, topic_len)
 			offset = offset + topic_len
 
 			varheader_subtree:add(f.publish_topic, topic)
 
 			if(fixhdr_qos > 0) then
-				local message_id = buffer(offset, 2)
+				message_id = buffer(offset, 2)
 				offset = offset + 2
 				varheader_subtree:add(f.publish_message_id, message_id)
 			end
@@ -192,15 +175,25 @@ do
 			local payload_subtree = subtree:add("Payload", nil)
 			-- Data
 			local data_len = remain_length - (offset - varhdr_init)
-			local data = buffer(offset, data_len)
+			local data = buffer(offset, data_len):uncompress()
 			offset = offset + data_len
-			payload_subtree:add(f.publish_data, data)
 
+			local tvbdata = data:tvb()
+
+			if tvbdata(0, 1):string() == '{' then
+				Dissector.get("json"):call(tvbdata, pinfo, tree)
+			end
+			payload_subtree:add(f.payload_data, data)
+
+		elseif(msgindex == 4) then -- PUBACK
+			message_id = buffer(offset, 2)
+			offset = offset + 2
+			subtree:add(f.publish_message_id, message_id)
 
 		elseif(msgindex == 8 or msgindex == 10) then -- SUBSCRIBE & UNSUBSCRIBE
 			local varheader_subtree = subtree:add("Variable Header", nil)
 
-			local message_id = buffer(offset, 2)
+			message_id = buffer(offset, 2)
 			offset = offset + 2
 			varheader_subtree:add(f.subscribe_message_id, message_id)
 
@@ -208,12 +201,10 @@ do
 			while(offset < buffer:len()) do
 				local topic_len = buffer(offset, 2):uint()
 				offset = offset + 2
-				local topic = buffer(offset, topic_len)
+				topic = buffer(offset, topic_len)
 				offset = offset + topic_len
-				local qos = buffer(offset, 1)
-				offset = offset + 1
 
-				payload_subtree:add(f.subscribe_topic, topic)
+				payload_subtree:add(f.publish_topic, topic)
 				if(msgindex == 8) then -- QoS byte only for subscription
 					payload_subtree:add(f.subscribe_qos, qos)
 				end
@@ -222,7 +213,7 @@ do
 		elseif(msgindex == 9 or msgindex == 11) then -- SUBACK & UNSUBACK
 			local varheader_subtree = subtree:add("Variable Header", nil)
 
-			local message_id = buffer(offset, 2)
+			message_id = buffer(offset, 2)
 			offset = offset + 2
 			varheader_subtree:add(f.suback_message_id, message_id)
 
@@ -240,9 +231,19 @@ do
 			end
 		end
 
+		if topic then
+			subtree:append_text(", Topic: " .. topic:string())
+			info = info .. " " .. topic:string()
+		end
+		if message_id then
+			info = info .. " (id=" .. message_id:uint() .. ")"
+		end
+
+		pinfo.cols.info:set(info)
+
 	end
 
 	-- Register the dissector
-	tcp_table = DissectorTable.get("tcp.port")
-	tcp_table:add(1883, MQTTPROTO)
+	tcp_table = DissectorTable.get("ssl.port")
+	tcp_table:add(443, MQTTPROTO)
 end
