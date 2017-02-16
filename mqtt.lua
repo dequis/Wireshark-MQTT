@@ -19,7 +19,7 @@
 do
 	-- Create a new dissector
 	MQTTPROTO = Proto("MQTT-FB", "Facebook MQTT")
-	local bitw = require("bit")
+	local bitw = require("bit32")
 	local f = MQTTPROTO.fields
 	-- Fix header: byte 1
 	f.message_type = ProtoField.uint8("mqttfb.message_type", "Message Type", base.HEX, nil, 0xF0)
